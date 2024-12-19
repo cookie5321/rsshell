@@ -43,8 +43,8 @@ fn main() -> io::Result<()> {
     dup2(write_fd.as_raw_fd(), 1).expect("Failed to redirect stdout for child 1");
 
     // Spawn the first child process (cat) to read the file and write to the pipe
-    let mut child1 = Command::new("cat") // Replace "cat" with your desired command
-        // .arg("asdf")
+    let mut child1 = Command::new("grep") // Replace "cat" with your desired command
+        .arg("asdf")
         .stdin(Stdio::inherit()) // stdin is inherited (we'll redirect manually)
         .stdout(Stdio::inherit()) // We'll redirect stdout manually
         .spawn()?;
