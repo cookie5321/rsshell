@@ -12,7 +12,7 @@ fn run_commands(mut commands: Vec<String>) -> nix::Result<()> {
     let mut pipe_previous: Option<(RawFd, RawFd)> = None;
     let mut fd_output: Option<RawFd> = None;
     let mut fd_input: Option<RawFd> = None;
-    let mut children = Vec::new();
+    let mut children = vec![];
     let command_count = commands.len();
 
     if command_count == 1 {
@@ -65,9 +65,6 @@ fn run_commands(mut commands: Vec<String>) -> nix::Result<()> {
                 pipe_previous = pipe_next;
             }
             Ok(ForkResult::Child) => {
-                if let Some((read_fd, _)) = pipe_previous { dup2(read_fd, 0)?; }
-                if let Some((_, write_fd)) = pipe_next { dup2(write_fd, 1)?; }
-
                 if let Some(file_fd) = fd_input {
                     dup2(file_fd, 0)?;
                     close(file_fd)?;
@@ -76,6 +73,9 @@ fn run_commands(mut commands: Vec<String>) -> nix::Result<()> {
                     dup2(fd_output.unwrap(), 1)?;
                     close(fd_output.unwrap())?;
                 }
+
+                if let Some((read_fd, _)) = pipe_previous { dup2(read_fd, 0)?; }
+                if let Some((_, write_fd)) = pipe_next { dup2(write_fd, 1)?; }
 
                 let args = process_args(&command);
                 let Err(error) = execvp(&args[0], &args);
@@ -144,8 +144,6 @@ fn main() {
         input = input.trim().to_string();
 
         if input == "exit" { break; }
-        if input.is_empty() { continue; }
-
         let commands: Vec<String> = input
             .split("|")
             .map(|x| x.trim().to_string())
