@@ -183,37 +183,35 @@ use nix::fcntl::{open, OFlag};
 use nix::sys::stat::Mode;
 use nix::unistd::{close, dup2, execvp, fork, pipe, ForkResult};
 use std::ffi::CString;
+use std::fs::File;
 use std::os::unix::io::RawFd;
 use std::process::exit;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, IntoRawFd};
 
-fn execute_command(commands: Vec<Vec<String>>) {
+fn execute_command(mut commands: Vec<String>) -> nix::Result<()> {
     let mut prev_pipe: Option<(RawFd, RawFd)> = None;
-
-    let mut final_output_fd: Option<RawFd> = None; // To track output redirection
-
+    let mut output_fd: Option<RawFd> = None;
+    let mut input_fd: Option<RawFd> = None;
     let mut children = Vec::new(); // To track child PIDs
 
-    for (i, command) in commands.iter().enumerate() {
-        // Check for output redirection in the last command
-        if i == commands.len() - 1 {
-            if let Some(pos) = command.iter().position(|x| x == ">") {
-                final_output_fd = match open(command[pos + 1].as_str(), OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC, Mode::S_IRWXU) {
-                    Ok(fd) => Some(fd),
-                    Err(err) => {
-                        eprintln!("Failed to open file for output redirection: {}", err);
-                        exit(1);
-                    }
-                };
-            }
-        }
+    if let Some((command, file)) = commands[0].split_once(&String::from("<")) {
+        input_fd = Some(File::open(file.trim()).expect("file open failed").into_raw_fd());
+        commands[0] = command.trim().to_string();
+    }
 
+    if let Some((command, file)) = commands.last().unwrap().split_once(&String::from(">")) {
+        output_fd = Some(File::create(file.trim()).expect("file open failed").into_raw_fd());
+        let len = commands.len();
+        commands[len - 1] = command.trim().to_string();
+    }
+
+    for (i, command) in commands.iter().enumerate() {
 
         // Create a pipe for the next process, if necessary
         let next_pipe = if i < commands.len() - 1 {
             match pipe() {
-                Ok(p) => Some(p),
+                Ok((x, y)) => Some((x.into_raw_fd(), y.into_raw_fd())),
                 Err(err) => {
                     eprintln!("Failed to create pipe: {}", err);
                     exit(1);
@@ -227,63 +225,49 @@ fn execute_command(commands: Vec<Vec<String>>) {
             Ok(ForkResult::Child) => {
                 // Handle input redirection if applicable
                 if i == 0 {
-                    if let Some(pos) = command.iter().position(|x| x == "<") {
-                        let file_fd = match open(command[pos + 1].as_str(), OFlag::O_RDONLY, Mode::empty()) {
-                            Ok(fd) => fd,
-                            Err(err) => {
-                                eprintln!("Failed to open file for input redirection: {}", err);
-                                exit(1);
-                            }
-                        };
-                        if let Err(err) = dup2(file_fd, 0) {
-                            eprintln!("Failed to redirect stdin: {}", err);
-                            exit(1);
-                        }
-                        let _ = close(file_fd);
+                    if let Some(file_fd) = input_fd {
+                        dup2(file_fd, 0).expect("L");
+                        close(file_fd).expect("M");
                     }
                 }
 
-
                 // Redirect input from the previous pipe, if applicable
-                if let Some((read_fd, _)) = prev_pipe {
-                    if let Err(err) = dup2(read_fd, 0) {
-                        eprintln!("Failed to redirect stdin from pipe: {}", err);
-                        exit(1);
-                    }
+                if let Some((read_fd, write_fd)) = prev_pipe {
+                    dup2(read_fd, 0)?;
+                    // close(write_fd).expect("N");
+                    // dbg!(read_fd);
                 }
 
                 // Redirect output to the next pipe, if applicable
-                if let Some((_, ref write_fd)) = next_pipe {
-                    if let Err(err) = dup2(write_fd.as_raw_fd(), 1) {
-                        eprintln!("Failed to redirect stdout to pipe: {}", err);
-                        exit(1);
-                    }
+                if let Some((_, write_fd)) = next_pipe {
+                    dup2(write_fd, 1).expect("A");
+                    // dbg!(write_fd);
                 }
+
                 if i == commands.len() - 1 {
-                    if let Some(output_fd) = final_output_fd {
-                        if let Err(err) = dup2(output_fd, 1) {
-                            eprintln!("Failed to redirect stdout to file: {}", err);
-                            exit(1);
-                        }
-                        let _ = close(output_fd);
+                    if let Some(output_fd) = output_fd {
+                        dup2(output_fd, 1).expect("B");
+                        // dbg!(output_fd);
+                        close(output_fd).expect("K");
                     }
                 }
                 // Close unused file descriptors
                 if let Some((read_fd, write_fd)) = prev_pipe {
-                    let _ = close(read_fd);
-                    let _ = close(write_fd);
+                    // let _ = close(read_fd);
+                    // close(write_fd).expect("J");
                 }
                 if let Some((read_fd, write_fd)) = next_pipe {
-                    let _ = close(read_fd.into_raw_fd());
-                    let _ = close(write_fd.into_raw_fd());
+                    // let _ = close(read_fd);
+                    // let _ = close(write_fd);
                 }
 
                 // Execute the command
-                let args: Vec<CString> = command
-                    .iter()
-                    .filter(|x| x != &"<" && x != &">")
-                    .map(|arg| CString::new(arg.as_str()).unwrap())
+                let args: Vec<CString> = command.split(" ")
+                    .filter(|x| !(x.contains("<") || x.contains(">")))
+                    .map(|x| CString::new(x).expect("Failed to convert to CString"))
                     .collect();
+                dbg!(&args);
+                dbg!(input_fd, output_fd, prev_pipe, next_pipe);
                 if let Err(err) = execvp(&args[0], &args) {
                     eprintln!("Failed to execute command: {}", err);
                     exit(1);
@@ -292,14 +276,24 @@ fn execute_command(commands: Vec<Vec<String>>) {
             Ok(ForkResult::Parent{child}) => {
 
                 // Track child processes
-                children.push(nix::unistd::getpid());
+                children.push(child);
+
+                dbg!("wait started");
+                nix::sys::wait::wait().expect("C");
+
+                if let Some((a, b)) = next_pipe {
+                    dbg!(a, "closing");
+                    close(b).expect("E");
+                }
+
+                dbg!("wait ended");
 
                 // Close unused file descriptors in the parent
                 if let Some((read_fd, write_fd)) = prev_pipe {
-                    let _ = close(read_fd);
-                    let _ = close(write_fd);
+                    close(read_fd).expect("H");
+                    // close(write_fd).expect("I");
                 }
-                prev_pipe = next_pipe.map( |(read_fd, write_fd)| (read_fd.into_raw_fd(), write_fd.into_raw_fd()));
+                prev_pipe = next_pipe;
             }
             Err(err) => {
                 eprintln!("Failed to fork: {}", err);
@@ -308,16 +302,22 @@ fn execute_command(commands: Vec<Vec<String>>) {
         }
     }
 
+    if let Some(a) = output_fd {
+        dbg!(a, "closing");
+        close(a).expect("D");
+    }
     // Close any remaining file descriptors in the parent
     if let Some((read_fd, write_fd)) = prev_pipe {
-        let _ = close(read_fd);
-        let _ = close(write_fd);
+        let _ = close(read_fd).expect("F");
+        let _ = close(write_fd).expect("G");
     }
 
     // Wait for all children to finish
     for _ in children {
         let _ = nix::sys::wait::wait();
     }
+
+    Ok(())
 }
 
 fn main() {
@@ -341,19 +341,9 @@ fn main() {
         }
 
         // Parse the input into commands and arguments
-        let mut commands: Vec<Vec<String>> = Vec::new();
-        let mut current_command: Vec<String> = Vec::new();
-        for token in input.split_whitespace() {
-            if token == "|" {
-                commands.push(current_command);
-                current_command = Vec::new();
-            } else {
-                current_command.push(token.to_string());
-            }
-        }
-        commands.push(current_command);
+        let mut commands: Vec<String> = input.split("|").map(|x| x.trim().to_string()).collect();
 
         // Execute the parsed commands
-        execute_command(commands);
+        execute_command(commands).expect("Failed to execute command");
     }
 }
