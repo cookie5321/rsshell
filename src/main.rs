@@ -56,7 +56,7 @@ fn run_commands(mut commands: Vec<String>) -> nix::Result<()> {
 
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child }) => {
-                children.push(waitpid(child, None)?);
+                children.push(child);
 
                 if let Some((_, fd_write)) = pipe_next { close(fd_write)?; }
                 if let Some((fd_read, _)) = pipe_previous { close(fd_read)?; }
@@ -97,10 +97,14 @@ fn run_commands(mut commands: Vec<String>) -> nix::Result<()> {
         close(write_fd)?;
     }
 
-    for child in children {
+    let mut wait_results = vec![];
+
+    for child in children { wait_results.push(waitpid(child, None)?); }
+
+    for result in wait_results {
         println!("[oh-my-shell] Child process terminated: pid {}, {}",
-             child.pid().unwrap(),
-             match child {
+             result.pid().unwrap(),
+             match result {
                  WaitStatus::Exited(_, b) => format!("status: {b}"),
                  WaitStatus::Signaled(_, b, _) => format!("killed by the signal {:?}", b),
                  _ => "unknown exit cause".to_string()
@@ -147,7 +151,10 @@ fn main() {
             .map(|x| x.trim().to_string())
             .collect();
 
-        if let Err(_) = run_commands(commands) { continue; }
+        if let Err(error) = run_commands(commands) {
+            println!("execution failed: {}", error);
+            continue;
+        }
     }
 
     println!("Exit oh-my-shell. Bye!");
